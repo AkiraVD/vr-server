@@ -30,6 +30,44 @@ first. Then open the printed address in the headset's browser.
 Nothing starts automatically, and nothing is installed: the only requirements
 are Python 3 and ffmpeg.
 
+Two things about the launcher are worth knowing before you change `port`:
+
+* It frees the port by killing whatever is listening on it, which is not
+  necessarily an old vr-server. Pick a port nothing else on the machine wants,
+  or starting this will stop that other program instead.
+* The address it prints is this machine's own LAN address, reported for
+  convenience and never checked against `allow`. If it is not on the list,
+  opening it returns 403 -- that is the allow list working, not a fault.
+
+## Access over Tailscale
+
+Tailscale gives every device a stable address in `100.64.0.0/10` that works
+from anywhere, without forwarding a port on the router. To reach the server
+that way, leave `host` at `0.0.0.0` and add the range to `allow`:
+
+    "allow": ["127.0.0.1", "100.64.0.0/10"]
+
+Then browse to this machine's tailnet address, or its MagicDNS name if that is
+enabled:
+
+    http://100.x.y.z:PORT/
+    http://<machine>.<tailnet>.ts.net:PORT/
+
+`tailscale ip -4` prints the address, `tailscale status` the name.
+
+The whole range is one entry rather than a device list because everything
+inside it is already authenticated by Tailscale; nothing reaches that address
+without being on your tailnet. List individual addresses instead if you want
+the allow list to narrow it further.
+
+The headset needs Tailscale installed and signed in for any of this -- a Quest
+runs Android, so the Android build works. Without it, use the LAN address and
+put the headset's LAN IP in `allow`.
+
+Two settings can stop this working: `tailscale up --shields-up` blocks incoming
+connections outright, and a restrictive tailnet ACL can do the same for a
+specific port. `tailscale debug prefs` shows the first.
+
 ## Layout
 
     config.example.json  tracked template; copy it to config.json
@@ -119,3 +157,5 @@ orphan the running process it exists to find.
   cannot be opened by a VR player and would only be clutter.
 * **No authentication.** The allow list is the only access control, so keep
   this on a trusted network and do not expose the port to the internet.
+  Tailscale is the way to reach it from outside the house, because it
+  authenticates the device before any request arrives here.
