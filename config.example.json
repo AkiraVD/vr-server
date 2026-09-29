@@ -1,0 +1,12 @@
+{
+  "root": "/path/to/your/media",
+  "host": "0.0.0.0",
+  "port": 8080,
+  "thumbs": ".thumbs",
+  "log": "access.log",
+  "scan": [],
+  "allow": [],
+  "thumb_width": 480,
+  "seek_fraction": 0.5,
+  "max_ffmpeg": 3
+}

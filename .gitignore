@@ -1,0 +1,29 @@
+# Generated at runtime -- everything here is rebuilt on demand.
+
+# Thumbnail and metadata cache. Derived from the media files, several MB, and
+# regenerates on the next start, so there is nothing worth versioning.
+.thumbs/
+
+# Request log. Grows without bound and records local IP addresses.
+access.log
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtualenvs, if you ever add one
+.venv/
+venv/
+
+# Editor scratch
+*.swp
+*~
+
+# Your settings: media paths, and the IP allow list.
+#
+# Untracked on purpose. config.json names your folder layout and the addresses
+# of devices on your network, so it should never reach a remote.
+#
+# Copy config.example.json to config.json and edit it; the example is tracked
+# and carries placeholder values only. See README.md.
+config.json
