@@ -17,6 +17,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from .access import scan_roots
+from .access import is_protected
 from .config import (MAX_FFMPEG, SBS_MIN_ASPECT, SEEK_FRACTION, THUMB_DIR,
                      THUMB_WIDTH, VIDEO_EXTS)
 
@@ -143,11 +144,21 @@ def make_thumb(path, key):
 
 
 def find_videos(roots):
-    """Every video under `roots`, de-duplicated: scan entries may nest."""
+    """Every video under `roots`, de-duplicated: scan entries may nest.
+
+    Protected folders are skipped. The startup pass would otherwise write a
+    picture of every private file into the thumbnail cache whether or not
+    anyone ever unlocks the folder; on-demand rendering still covers them once
+    somebody does.
+    """
     videos, seen = [], set()
     for base in roots:
+        if is_protected(base):
+            continue
         for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            dirnames[:] = [d for d in dirnames
+                           if not d.startswith(".")
+                           and not is_protected(os.path.join(dirpath, d))]
             for name in filenames:
                 if os.path.splitext(name)[1].lower() not in VIDEO_EXTS:
                     continue

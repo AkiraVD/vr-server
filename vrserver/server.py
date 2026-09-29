@@ -16,8 +16,12 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 from . import listing
-from .access import in_scope, ip_allowed, log_line
-from .config import HOST, PORT, ROOT, THUMB_PREFIX
+from .access import (auth_configured, cookie_from_header, cookie_valid,
+                     credentials_ok, in_scope, ip_allowed, is_protected,
+                     log_line, make_cookie, set_protect)
+from .config import (COOKIE_NAME, HOST, LOCK_PATH, MAX_FORM_BYTES, PORT,
+                     PROTECT_PATH, ROOT, THUMB_PREFIX, UNLOCK_PATH,
+                     UNLOCK_SECONDS)
 from .media import cache_key, make_thumb
 
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)$")
@@ -69,12 +73,116 @@ class Handler(SimpleHTTPRequestHandler):
             return target
         return None
 
-    def send_bytes(self, payload, ctype, status=200):
+    def send_bytes(self, payload, ctype, status=200, no_store=False):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(payload)))
+        if no_store:
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Vary", "Cookie")
         self.end_headers()
         return io.BytesIO(payload)
+
+    def authed(self):
+        """Unlocked, by cookie or by credentials on this very request.
+
+        The cookie is what makes the listing work: that page is not protected,
+        so a browser would never send Basic credentials with it and the page
+        could not tell locked from unlocked.
+        """
+        if not auth_configured():
+            return False
+        return cookie_valid(cookie_from_header(self.headers.get("Cookie")))
+
+    def redirect(self, where):
+        self.send_response(303)
+        self.send_header("Location", where)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return None
+
+    def send_unlock(self, failed=False):
+        """Show the password form.
+
+        Protected folders are hidden, so without a door to knock on you would
+        have to remember a protected URL to be prompted at all.
+        """
+        if not auth_configured():
+            self.send_error(403, "No password is configured")
+            return None
+        if self.authed():
+            return self.redirect("/")
+        page = listing.login_page(failed).encode("utf-8")
+        return self.send_bytes(page, "text/html; charset=utf-8",
+                               status=401 if failed else 200, no_store=True)
+
+    def do_unlock(self, fields):
+        """Check the form and hand back a cookie."""
+        if not auth_configured():
+            self.send_error(403, "No password is configured")
+            return
+        user = (fields.get("user") or [""])[0]
+        password = (fields.get("password") or [""])[0]
+        if not credentials_ok(user, password):
+            log_line("UNLOCK FAILED %s" % self.client_address[0])
+            self.send_unlock(failed=True)
+            return
+
+        log_line("UNLOCK %s" % self.client_address[0])
+        self.send_response(303)
+        self.send_header("Location", "/")
+        self.send_header("Set-Cookie", self.cookie_header(make_cookie(),
+                                                          UNLOCK_SECONDS))
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def cookie_header(self, value, max_age):
+        """Set and clear must agree on every attribute or the clear is ignored.
+
+        Secure only when the request actually arrived over TLS: Tailscale Serve
+        terminates HTTPS and says so, while a plain-HTTP LAN client would
+        silently drop a Secure cookie and never appear to unlock at all.
+        """
+        secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
+        return ("%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict%s"
+                % (COOKIE_NAME, value, max_age, secure))
+
+    def send_lock(self):
+        """Drop the cookie again, for handing the headset to someone else."""
+        log_line("LOCK %s" % self.client_address[0])
+        self.send_response(303)
+        self.send_header("Location", "/")
+        self.send_header("Set-Cookie", self.cookie_header("", 0))
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return None
+
+    def require_auth(self, path):
+        """None if `path` may be served, otherwise the reply that refuses it.
+
+        Returns a sentinel rather than writing and returning None, because
+        send_head uses None to mean "nothing more to send".
+        """
+        if not is_protected(path):
+            return None
+        if not auth_configured():
+            # Fails closed: a protected folder with no usable password is not
+            # served at all. The alternative -- ignoring the setting -- would
+            # publish exactly what it was meant to hide.
+            log_line("PROTECTED %s  no password configured, refusing" % path)
+            self.send_error(403, "Protected, but no password is configured")
+            return False
+        if self.authed():
+            return None
+        # The form, not a Basic challenge: a browser that answers a Basic
+        # challenge keeps sending those credentials for the rest of the session,
+        # which would make "Lock again" impossible to honour.
+        self.send_response(303)
+        self.send_header("Location", UNLOCK_PATH)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        return False
 
     def reject_range(self, size, fileobj):
         fileobj.close()
@@ -93,6 +201,10 @@ class Handler(SimpleHTTPRequestHandler):
             return None
         if not in_scope(path):
             self.send_error(403, "Not a configured folder")
+            return None
+        # A thumbnail is a picture of the file. Gating the video but not its
+        # preview would hand over the thing worth hiding.
+        if self.require_auth(path) is False:
             return None
 
         key = cache_key(path)
@@ -116,11 +228,15 @@ class Handler(SimpleHTTPRequestHandler):
 
     def list_directory(self, path):
         try:
-            page = listing.render(path)
+            page = listing.render(path, authed=self.authed())
         except OSError:
             self.send_error(403, "Directory listing not permitted")
             return None
-        return self.send_bytes(page.encode("utf-8"), "text/html; charset=utf-8")
+        # What this page contains depends on the unlock cookie, so a cached copy
+        # is a wrong copy: locking would redirect you to a stale page still
+        # showing the unlocked library, and appear to do nothing at all.
+        return self.send_bytes(page.encode("utf-8"), "text/html; charset=utf-8",
+                               no_store=True)
 
     def send_file(self, path):
         """A file, whole or as a byte range."""
@@ -175,6 +291,10 @@ class Handler(SimpleHTTPRequestHandler):
             return None
 
         req = urllib.parse.urlsplit(self.path).path
+        if req == UNLOCK_PATH:
+            return self.send_unlock()
+        if req == LOCK_PATH:
+            return self.send_lock()
         if req.startswith(THUMB_PREFIX):
             return self.send_thumb(req[len(THUMB_PREFIX):])
 
@@ -182,9 +302,68 @@ class Handler(SimpleHTTPRequestHandler):
         if not in_scope(path):
             self.send_error(403, "Not a configured folder")
             return None
+        if self.require_auth(path) is False:
+            return None
         if os.path.isdir(path):
             return super().send_head()   # redirect, index.html, or listing
         return self.send_file(path)
+
+    def read_form(self):
+        """Parsed form body, or None if it was refused."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.send_error(400, "Bad length")
+            return None
+        if length > MAX_FORM_BYTES:
+            self.send_error(413, "Too much form data")
+            return None
+        body = self.rfile.read(length) if length else b""
+        return urllib.parse.parse_qs(body.decode("utf-8", "replace"))
+
+    def save_protect(self):
+        """Replace the protected list. The only write this server accepts.
+
+        Requires the unlock *cookie* specifically, not merely valid credentials.
+        The cookie is SameSite=Strict, so a form on another site cannot cause
+        the browser to send it, which is what stops a hostile page unlocking
+        your library behind your back.
+        """
+        if not auth_configured():
+            self.send_error(403, "No password is configured")
+            return
+        if not cookie_valid(cookie_from_header(self.headers.get("Cookie"))):
+            self.send_error(403, "Unlock first")
+            return
+
+        fields = self.read_form()
+        if fields is None:
+            return
+        kept = set_protect(fields.get("protect", []))
+        log_line("PROTECT %s  now: %s" % (self.client_address[0],
+                                          ", ".join(kept) or "(nothing)"))
+
+        self.send_response(303)
+        self.send_header("Location", "/")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_POST(self):
+        peer = self.client_address[0]
+        if not ip_allowed(peer):
+            log_line("DENIED %s  %s" % (peer, self.path))
+            self.send_error(403, "Not allowed from this address")
+            return
+        try:
+            req = urllib.parse.urlsplit(self.path).path
+            if req == UNLOCK_PATH:
+                self.do_unlock(self.read_form())
+            elif req == PROTECT_PATH:
+                self.save_protect()
+            else:
+                self.send_error(404, "Nothing here accepts a POST")
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def do_GET(self):
         # Players abort mid-transfer on every seek; that is normal, not an error.

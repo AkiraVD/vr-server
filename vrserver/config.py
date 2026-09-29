@@ -26,6 +26,9 @@ DEFAULTS = {
     "thumbs": os.path.join(PROJECT_DIR, ".thumbs"),
     "scan": [],             # folders pre-rendered on startup, walked recursively
     "allow": [],            # IPs/CIDRs permitted to connect; empty = everyone
+    "protect": [],          # folders needing a password; empty = nothing hidden
+    "auth_user": "",        # username for protected folders
+    "auth_hash": "",        # pbkdf2_sha256$iters$salt$hash - set with --set-password
     "log": "",              # access log path; empty = console only
     "thumb_width": 480,
     "seek_fraction": 0.5,   # grab a frame from the middle of the video
@@ -76,11 +79,36 @@ def load_config(path):
         for key in NUMERIC_KEYS:
             cfg[key] = DEFAULTS[key]
 
-    for key in ("scan", "allow"):
+    for key in ("scan", "allow", "protect"):
         if not isinstance(cfg[key], list):
             print("config: %r must be a list, ignoring" % key, file=sys.stderr)
             cfg[key] = []
     return cfg
+
+
+def save_protect(entries):
+    """Persist just the `protect` list back to config.json.
+
+    The one thing the HTTP layer may write, and it writes nothing else: the
+    file is re-read, only this key is replaced, and the result is swapped in
+    atomically so a crash mid-write cannot leave a truncated config. Mode 0600
+    is preserved because the same file holds the password hash.
+    """
+    try:
+        with open(CONFIG_PATH) as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            raise ValueError("expected a JSON object")
+    except FileNotFoundError:
+        data = {}
+    data["protect"] = list(entries)
+
+    tmp = CONFIG_PATH + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, CONFIG_PATH)
 
 
 CFG = load_config(CONFIG_PATH)
@@ -109,9 +137,25 @@ THUMB_WIDTH = CFG["thumb_width"]
 MAX_FFMPEG = CFG["max_ffmpeg"]
 SEEK_FRACTION = CFG["seek_fraction"]
 LOG_PATH = CFG["log"]
+AUTH_USER = CFG["auth_user"]
+AUTH_HASH = CFG["auth_hash"]
 
 # URL prefix the thumbnail route answers on.
 THUMB_PREFIX = "/_thumb/"
+
+# Unlocking. Basic auth alone cannot drive this: the listing page is not itself
+# protected, so a browser has no reason to send credentials with it and the page
+# could never tell an unlocked visitor from a locked one. /_unlock checks the
+# password once and sets a signed cookie that every later request carries.
+UNLOCK_PATH = "/_unlock"
+# The only route that writes anything, and only the `protect` list.
+PROTECT_PATH = "/_protect"
+MAX_FORM_BYTES = 64 * 1024
+LOCK_PATH = "/_lock"
+COOKIE_NAME = "vrs_unlock"
+UNLOCK_SECONDS = 12 * 3600
+# Beside config.json, and 0600: anyone holding this key can mint a valid cookie.
+COOKIE_KEY_PATH = os.path.join(PROJECT_DIR, ".unlock.key")
 
 # Width/height at or above this means the frame holds both eyes side by side.
 SBS_MIN_ASPECT = 1.9

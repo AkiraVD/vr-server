@@ -6,6 +6,9 @@
   "log": "access.log",
   "scan": [],
   "allow": [],
+  "protect": [],
+  "auth_user": "",
+  "auth_hash": "",
   "thumb_width": 480,
   "seek_fraction": 0.5,
   "max_ffmpeg": 3

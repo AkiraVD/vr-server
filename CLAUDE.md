@@ -4,14 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A read-only HTTP server (Python 3 standard library + ffmpeg, no packages) that
-serves a VR video library to a player inside a Quest 3 headset. Nothing is
-transcoded and nothing is written by the HTTP layer — GET and HEAD only.
+An almost read-only HTTP server (Python 3 standard library + ffmpeg, no
+packages) that serves a VR video library to a player inside a Quest 3 headset.
+Nothing is transcoded. Serving is GET and HEAD only.
+
+The one exception is `POST /_protect`, which rewrites the `protect` list in
+`config.json` and nothing else. It exists so the locked folders can be chosen
+from the headset, needs the unlock cookie, and is the only write the HTTP layer
+performs. Keep it that way: new writes do not belong here.
 
 ## Commands
 
     ./start.sh                           run (foreground; stops any old server first)
-    ./run-tests.sh                       full suite (57 tests, unittest, no pytest)
+    ./run-tests.sh                       full suite (121 tests, unittest, no pytest)
     ./run-tests.sh -k test_suffix_range  a single test (args pass through to unittest)
     python3 -m unittest tests.test_http -v          one module
     python3 -m vrserver --print-config   resolved settings as JSON
@@ -48,13 +53,32 @@ first — it builds a temporary media tree, writes a config, sets
 Always reach the package through `from .fixture import ... , server, config`,
 never `import vrserver` directly in a test.
 
-### Two independent gates, both fail open
+### Three gates; two fail open, one fails closed
 
 Every request passes `ip_allowed(peer)` (allow list, plain IPs or CIDR) and
 then `in_scope(path)` (must be `root` itself or inside a configured `scan`
 folder). An empty `allow` or `scan` list disables that check entirely rather
 than denying everything — deliberate, and asserted by tests. `safe_abs` /
 `translate_path` additionally realpath-confine everything to `ROOT`.
+
+`protect` is the third gate and the deliberate exception. A folder listed there
+needs HTTP Basic credentials before it is served, listed, or thumbnailed, and
+one with **no usable password is refused outright** rather than served: the
+fail-open argument does not survive a gate whose failure would publish exactly
+what it exists to hide. `tests/test_protect.py` asserts that inversion, and
+`find_videos` skips protected folders so the startup pass never renders a
+thumbnail of content nobody has unlocked.
+
+`/_unlock` serves a password form and, on POST, sets an HMAC-signed cookie (key
+at `.unlock.key`, 0600, git-ignored); `/_lock` clears it. The cookie is the
+*only* thing `authed()` accepts.
+
+Deliberately not HTTP Basic, which an earlier version used. A browser that
+answers a Basic challenge keeps sending those credentials to the origin for the
+rest of the session with no way to revoke them, so `/_lock` cleared the cookie
+and the next request arrived authenticated regardless. Do not reintroduce an
+`Authorization` path; `tests/test_protect.py` asserts that such a header grants
+nothing.
 
 ### Range support is the point of the project
 

@@ -20,8 +20,10 @@ import html
 import os
 import urllib.parse
 
-from .access import scan_roots
-from .config import CFG, ROOT, THUMB_PREFIX, VIDEO_EXTS
+from .access import (auth_configured, candidate_folders, is_protected,
+                     protected_set, scan_roots)
+from .config import (CFG, LOCK_PATH, PROTECT_PATH, ROOT, THUMB_PREFIX,
+                     UNLOCK_PATH, VIDEO_EXTS)
 from .media import cache_key, is_sbs, probe
 
 CSS = """
@@ -52,6 +54,83 @@ body {
 
 .wrap { display: flex; align-items: flex-start; min-height: 100vh; }
 
+/* ---- the unlock page ------------------------------------------------- */
+body.login { display: flex; align-items: center; justify-content: center;
+             min-height: 100vh; padding: 20px; }
+body.login .sheet { position: static; transform: none; max-height: none; }
+.field { display: block; margin-bottom: 14px; }
+.field span {
+  display: block; margin-bottom: 7px;
+  font-size: 12px; font-weight: 600; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--dim);
+}
+.field input {
+  width: 100%; min-height: 50px; padding: 0 14px;
+  background: #080a0e; color: var(--text);
+  border: 1px solid var(--line-hi); border-radius: 10px;
+  font: 400 16px/1 inherit;
+}
+.field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---- rail controls, top right of the brand bar ------------------------ */
+.actions { display: flex; gap: 6px; flex: none; }
+.act {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px;
+  border: 1px solid var(--line-hi); border-radius: 9px;
+  background: var(--surface);
+  color: var(--dim); text-decoration: none;
+}
+.act:hover { background: var(--surface-hi); color: var(--text); }
+.act svg { width: 16px; height: 16px; }
+
+/* ---- the locked-folders dialog (a :target modal, so no JavaScript) ---- */
+.modal { display: none; }
+.modal:target { display: block; }
+.modal .backdrop {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(2, 4, 8, .72);
+  -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+}
+.sheet {
+  position: fixed; z-index: 41;
+  left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(76vh, 720px);
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line-hi); border-radius: var(--r);
+  padding: 22px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .6);
+}
+.sheet h2 { margin: 0; font-size: 20px; font-weight: 650; }
+.sheet .sub { margin: 6px 0 14px; font-size: 14px; color: var(--dim); }
+.rows {
+  flex: 1 1 auto; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: #080a0e; padding: 6px;
+}
+.rows .row {
+  display: flex; align-items: center; gap: 11px;
+  min-height: 46px; padding-right: 12px;
+  border-radius: 8px; cursor: pointer;
+  font-size: 15px;
+}
+.rows .row:hover { background: var(--surface-hi); }
+.rows input { width: 20px; height: 20px; flex: none; accent-color: var(--accent); }
+.rows .none { color: var(--dim); padding: 14px; margin: 0; }
+.sheet-acts {
+  display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px;
+}
+.btn {
+  display: inline-flex; align-items: center;
+  min-height: 46px; padding: 0 20px;
+  border: 1px solid var(--line-hi); border-radius: 10px;
+  background: var(--surface-hi); color: var(--text);
+  font: 600 15px/1 inherit; text-decoration: none; cursor: pointer;
+}
+.btn.go { background: var(--accent); color: #04070d; border-color: var(--accent); }
+
 /* ---- rail: the directory tree ---------------------------------------- */
 
 aside {
@@ -65,12 +144,16 @@ aside {
 
 .brand {
   position: sticky; top: 0; z-index: 2;
-  padding: 19px 18px 15px;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 13px 13px 13px 18px;
   background: var(--rail);
   border-bottom: 1px solid var(--line);
   font-size: 12px; font-weight: 600;
   letter-spacing: .17em; text-transform: uppercase;
   color: var(--dim);
+}
+.brand > span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
 .tree { padding: 10px 10px 0; }
@@ -258,6 +341,22 @@ ICON_FOLDER = _SVG % ('<path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17'
                       'a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/>')
 ICON_HOME = _SVG % ('<path d="M3 10.5 12 4l9 6.5V20a1 1 0 0 1-1 1H4a1 1 0 0 '
                     '1-1-1z"/>')
+ICON_GEAR = _SVG % ('<circle cx="12" cy="12" r="3"/>'
+                    '<path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8'
+                    'l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0'
+                    'v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8'
+                    'l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1'
+                    'A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8'
+                    'l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1'
+                    'a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8'
+                    'l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1'
+                    'a1.6 1.6 0 0 0-1.5 1z"/>')
+
+ICON_LOCK = _SVG % ('<rect x="5" y="11" width="14" height="9" rx="2"/>'
+                    '<path d="M8 11V8a4 4 0 0 1 8 0v3"/>')
+ICON_OPEN = _SVG % ('<rect x="5" y="11" width="14" height="9" rx="2"/>'
+                    '<path d="M8 11V8a4 4 0 0 1 7.5-2"/>')
+
 ICON_FILM = _SVG % ('<rect x="3" y="5" width="18" height="14" rx="2"/>'
                     '<path d="M7 5v14M17 5v14M3 12h18M3 8.5h4M3 15.5h4'
                     'M17 8.5h4M17 15.5h4"/>')
@@ -267,9 +366,10 @@ PAGE = (
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<meta name='color-scheme' content='dark'>"
     "<title>%s</title><style>%s</style></head><body><div class='wrap'>"
-    "<aside><div class='brand'>%s</div><nav class='tree'>%s</nav></aside>"
+    "<aside><div class='brand'><span>%s</span><div class='actions'>%s</div></div>"
+    "<nav class='tree'>%s</nav></aside>"
     "<section><header>%s<h1>%s</h1><div class='count'>%s</div></header>"
-    "<main>%s</main></section></div></body></html>")
+    "<main>%s</main></section></div>%s</body></html>")
 
 
 def human_size(n):
@@ -294,9 +394,17 @@ def human_time(seconds):
     return "%d:%02d" % (minutes, secs)
 
 
-def visible_names(path, at_root):
-    """Entries worth showing: configured folders at the root, video below."""
+def visible_names(path, at_root, authed=False):
+    """Entries worth showing: configured folders at the root, video below.
+
+    Protected entries are omitted entirely unless the request carried the
+    password. Not greyed out, not badged -- absent, so the listing gives away
+    neither the names nor the fact that anything is hidden.
+    """
     names = [n for n in os.listdir(path) if not n.startswith(".")]
+
+    if not authed:
+        names = [n for n in names if not is_protected(os.path.join(path, n))]
 
     # At the top level show only folders config asks for, so unrelated trees
     # (game assets, downloads) stay out of the way in the headset.
@@ -320,22 +428,22 @@ def visible_names(path, at_root):
     return names
 
 
-def subdirs(path, at_root):
+def subdirs(path, at_root, authed=False):
     """Just the folders, for the rail."""
     try:
-        names = visible_names(path, at_root)
+        names = visible_names(path, at_root, authed)
     except OSError:
         return []
     return [n for n in names if os.path.isdir(os.path.join(path, n))]
 
 
-def videos(path, at_root):
+def videos(path, at_root, authed=False):
     """Just the playable files, for the grid."""
-    names = visible_names(path, at_root)
+    names = visible_names(path, at_root, authed)
     return [n for n in names if not os.path.isdir(os.path.join(path, n))]
 
 
-def tree(root, here):
+def tree(root, here, authed=False):
     """The rail.
 
     Only the branch leading to the current folder is opened, plus that
@@ -348,7 +456,7 @@ def tree(root, here):
 
     def level(path, depth, url):
         out = []
-        for name in subdirs(path, at_root=(depth == 0)):
+        for name in subdirs(path, at_root=(depth == 0), authed=authed):
             child = os.path.join(path, name)
             curl = "%s/%s" % (url, urllib.parse.quote(name))
             on_trail = depth < len(trail) and trail[depth] == name
@@ -368,6 +476,101 @@ def tree(root, here):
             % (home_cls, ICON_HOME,
                html.escape(os.path.basename(root) or "Library")))
     return home + level(root, 0, "")
+
+
+def actions(authed):
+    """The controls at the top right: the lock, and the settings gear.
+
+    Protected folders are hidden, so without a visible way in you would have to
+    remember a protected URL and type it just to be prompted. Its presence does
+    reveal that *something* is protected -- but a lock nobody can find is not a
+    lock, it is a lost folder.
+
+    Nothing at all when no password is configured, since there is nothing to
+    unlock and nothing safe to configure.
+    """
+    if not auth_configured():
+        return ""
+    # Icon-only: the rail is 252px wide and the library name is already in it,
+    # so labels would wrap. title and aria-label carry the meaning instead.
+    if not authed:
+        return ("<a class='act' href='%s' title='Unlock' aria-label='Unlock'>%s</a>"
+                % (UNLOCK_PATH, ICON_LOCK))
+    return ("<a class='act' href='#config' title='Choose locked folders' "
+            "aria-label='Choose locked folders'>%s</a>"
+            "<a class='act' href='%s' title='Lock again' aria-label='Lock again'>%s</a>"
+            % (ICON_GEAR, LOCK_PATH, ICON_OPEN))
+
+
+LOGIN_PAGE = (
+    "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<meta name='color-scheme' content='dark'>"
+    "<title>Unlock</title><style>%s</style></head><body class='login'>"
+    "<form class='sheet' method='post' action='%s' autocomplete='off'>"
+    "<h2>Unlock</h2>"
+    "<p class='sub'>%s</p>"
+    "<label class='field'><span>Name</span>"
+    "<input name='user' autocapitalize='none' autocorrect='off'></label>"
+    "<label class='field'><span>Password</span>"
+    "<input name='password' type='password'></label>"
+    "<div class='sheet-acts'><a class='btn' href='/'>Back</a>"
+    "<button class='btn go' type='submit'>Unlock</button></div>"
+    "</form></body></html>")
+
+
+def login_page(failed=False):
+    """The password form.
+
+    Its own page rather than an HTTP Basic challenge, because a browser will go
+    on sending Basic credentials for the rest of the session and "Lock again"
+    could never take them back.
+    """
+    message = ("That did not match." if failed
+               else "Enter the password to show the locked folders.")
+    return LOGIN_PAGE % (CSS, UNLOCK_PATH, html.escape(message))
+
+
+def config_modal(authed):
+    """The dialog for choosing which folders are locked.
+
+    A `:target` modal and a plain form post, so this page still needs no
+    JavaScript. Only rendered once unlocked: changing what is protected is
+    exactly the thing the password is guarding.
+
+    An unchecked box submits nothing, so clearing every box unlocks everything
+    -- which is the intended way to turn protection off entirely.
+    """
+    if not authed:
+        return ""
+    rows = []
+    # Ticked means "named in the config", not "currently covered". A folder
+    # inside a locked one is already protected; showing it ticked would make
+    # saving replace one parent entry with a pile of redundant children.
+    explicit = protected_set()
+    for rel in candidate_folders():
+        checked = " checked" if rel in explicit else ""
+        depth = rel.count("/")
+        rows.append(
+            "<label class='row' style='padding-left:%dpx'>"
+            "<input type='checkbox' name='protect' value='%s'%s>"
+            "<span>%s</span></label>"
+            % (14 + depth * 18, html.escape(rel, quote=True), checked,
+               html.escape(rel.split("/")[-1])))
+    if not rows:
+        rows.append("<p class='none'>No folders here yet.</p>")
+
+    return ("<div class='modal' id='config'>"
+            "<a class='backdrop' href='#' aria-label='Close'></a>"
+            "<form class='sheet' method='post' action='%s'>"
+            "<h2>Locked folders</h2>"
+            "<p class='sub'>Ticked folders need the password, and stay hidden "
+            "until it is given.</p>"
+            "<div class='rows'>%s</div>"
+            "<div class='sheet-acts'><a class='btn' href='#'>Cancel</a>"
+            "<button class='btn go' type='submit'>Save</button></div>"
+            "</form></div>"
+            % (PROTECT_PATH, "".join(rows)))
 
 
 def breadcrumbs(rel_here, home):
@@ -414,8 +617,11 @@ def video_card(full, link, safe_name, root):
                chip, dur, safe_name, size or "&nbsp;"))
 
 
-def render(path):
-    """The full HTML page for a directory. Raises OSError if unreadable."""
+def render(path, authed=False):
+    """The full HTML page for a directory. Raises OSError if unreadable.
+
+    `authed` decides whether protected folders are part of the page at all.
+    """
     root = os.path.realpath(ROOT)
     here = os.path.realpath(path)
     rel_here = "" if here == root else os.path.relpath(here, root)
@@ -424,7 +630,7 @@ def render(path):
     home = os.path.basename(root) or "Library"
     title = rel_here.split(os.sep)[-1] if rel_here else home
 
-    names = videos(path, at_root)
+    names = videos(path, at_root, authed)
     cards, total = [], 0
     for name in names:
         full = os.path.join(path, name)
@@ -448,7 +654,7 @@ def render(path):
         body = ("<div class='empty'>%s<p>Nothing to play in this folder.</p>"
                 "%s</div>" % (ICON_FILM, hint))
 
-    return PAGE % (html.escape(title), CSS, html.escape(home),
-                   tree(root, here),
+    return PAGE % (html.escape(title), CSS, html.escape(home), actions(authed),
+                   tree(root, here, authed),
                    breadcrumbs(rel_here, html.escape(home)),
-                   html.escape(title), count, body)
+                   html.escape(title), count, body, config_modal(authed))

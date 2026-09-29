@@ -68,6 +68,95 @@ Two settings can stop this working: `tailscale up --shields-up` blocks incoming
 connections outright, and a restrictive tailnet ACL can do the same for a
 specific port. `tailscale debug prefs` shows the first.
 
+## Password-protected folders
+
+Folders named in `protect` are not served, and do not appear in the listing or
+the rail, until the request carries the password. Not greyed out and not
+badged -- absent, so the page gives away neither the names nor the fact that
+anything is hidden. Their thumbnails are refused too: a preview of a private
+file is the thing worth hiding, so gating the video alone would leak it.
+
+### Unlocking
+
+The header carries an **Unlock** control at the top right whenever a password
+is configured. Tapping it prompts for the password and then shows the protected
+folders; it is replaced by **Folders** and **Lock** afterwards.
+
+That control exists because the folders are hidden. Without a door to knock on
+you would have to remember a protected URL and type it just to be prompted --
+and a lock nobody can find is not a lock, it is a lost folder. The cost is that
+its presence reveals *something* is protected, though never what or how much.
+
+Unlocking is a form post, and sets a signed cookie (`HttpOnly`,
+`SameSite=Strict`, twelve hours, `Secure` when the request arrived over HTTPS).
+The cookie is the only thing that grants access; a protected path reached
+without one redirects to the form.
+
+**Not HTTP Basic**, which was the first attempt and had to be abandoned. A
+browser that answers a Basic challenge keeps sending those credentials on every
+later request to the same origin, and nothing can ask it to stop -- so "Lock
+again" cleared the cookie and the very next request arrived authenticated all
+over again. The button looked broken because the design was. An `Authorization`
+header is now ignored entirely, and a test asserts it grants nothing.
+
+The cookie is signed with a key at `.unlock.key`, created on first use at 0600
+and git-ignored. Deleting it invalidates every outstanding cookie, which is the
+blunt "sign every device out" this server otherwise lacks.
+
+### Choosing what is locked
+
+**Folders**, beside the lock, opens a dialog listing the folders under `root`
+with a tick beside each locked one. Saving rewrites just the `protect` list and
+takes effect at once -- no restart.
+
+It is a `:target` modal and a plain form post, so the page still ships no
+JavaScript, in keeping with the rest of the listing.
+
+A tick means *named in the config*, not *currently covered*. Children of a
+locked folder are already protected, so they are not offered at all; otherwise
+ticking twenty subfolders would replace one tidy config line with twenty
+redundant ones. Clearing every tick unlocks everything, which is how to turn
+protection off.
+
+This is the **only** route in the server that writes, and the only thing it
+writes is that one key. It requires the unlock cookie specifically rather than
+merely valid credentials: the cookie is `SameSite=Strict`, which is what stops
+a form on another site from causing your browser to send it. Paths that do not
+resolve to a directory inside `root` are dropped rather than stored, so the
+config never carries an entry that looks like cover it does not provide.
+
+Set the password with the command; the plain text never goes in `config.json`:
+
+    python3 -m vrserver --set-password
+
+It prompts, stores a PBKDF2-SHA256 hash, and rewrites `config.json` as 0600.
+Then name the folders and restart:
+
+    "protect": ["Flat/AV", "Flat/HAnimation", "VR/AV-VR"]
+
+Paths are relative to `root`, and cover everything beneath them.
+
+Send this over Tailscale (or any HTTPS front) rather than plain HTTP on the
+LAN: the cookie travels with every request, and `Secure` is only set when the
+request arrived over TLS.
+
+### This one gate fails closed
+
+`allow` and `scan` fail open when unconfigured: an empty list disables the
+check rather than denying everything, because a config typo that locks you out
+of a headset is hard to diagnose from inside one.
+
+`protect` inverts that. A folder named there with no usable password is refused
+outright, 403, and no password will open it until one is configured. The
+reasoning that makes fail-open right elsewhere does not hold when the failure
+would publish exactly what the setting exists to hide -- and unlike the others,
+this failure announces itself the moment you open the folder. The startup
+banner says which folders are protected, and warns loudly if a password is
+missing.
+
+The startup thumbnail pass skips protected folders as well, so nothing renders
+a picture of private content into the cache until somebody actually unlocks it.
+
 ## Layout
 
     config.example.json  tracked template; copy it to config.json
@@ -115,6 +204,9 @@ mistakes hide.
 | `log` | `""` | access log path; empty means console only |
 | `scan` | `[]` | folders shown at the root and pre-rendered on startup, walked recursively. Anything outside them returns 403. Empty disables the restriction |
 | `allow` | `[]` | IPs or CIDR ranges allowed to connect. Empty allows everyone, with a warning |
+| `protect` | `[]` | folders needing a password before they are served **or listed**. Empty protects nothing |
+| `auth_user` | `""` | username for those folders |
+| `auth_hash` | `""` | PBKDF2 hash of the password. Set it with `--set-password`, never by hand |
 | `thumb_width` | `480` | thumbnail width in pixels |
 | `seek_fraction` | `0.5` | where in the video to grab the frame; `0.5` is the middle |
 | `max_ffmpeg` | `3` | concurrent ffmpeg processes |
@@ -143,6 +235,8 @@ orphan the running process it exists to find.
     python3 -m vrserver --print-config   resolved settings as JSON
     python3 -m vrserver --print-paths    root and port, for start.sh
     python3 -m vrserver -appname TAG     override the instance tag
+    python3 -m vrserver --set-password   set the password for protected folders
+    python3 -m vrserver --set-password U  ... with username U, skipping the prompt
 
 ## Notes
 

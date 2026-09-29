@@ -27,3 +27,7 @@ venv/
 # Copy config.example.json to config.json and edit it; the example is tracked
 # and carries placeholder values only. See README.md.
 config.json
+
+# HMAC key for unlock cookies. Generated on first use, 0600. Anyone holding it
+# can mint a valid cookie, and deleting it signs every device out.
+.unlock.key

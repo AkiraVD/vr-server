@@ -72,8 +72,28 @@ if [[ -n "$OLD" ]]; then
     fi
 fi
 
-if ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then
-    echo "error: port $PORT is still in use by something else" >&2
+# Ask whether the server could actually bind, rather than whether anything at
+# all is listening on the port. `tailscale serve` holds a listener on the
+# tailnet address for the same port while proxying to us, and a plain "is
+# something on :$PORT" test reads that as a conflict and refuses to start -
+# permanently, for as long as Serve is configured. Binding the real host and
+# port is the only test that answers the question being asked.
+if ! python3 -c '
+import socket, sys
+from vrserver.config import HOST, PORT
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# Matches HTTPServer.allow_reuse_address, so the probe is neither more nor less
+# permissive than the bind it is standing in for.
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    sock.bind((HOST, PORT))
+except OSError as exc:
+    print(exc, file=sys.stderr)
+    sys.exit(1)
+finally:
+    sock.close()
+'; then
+    echo "error: cannot bind port $PORT" >&2
     echo "       check with:  ss -ltnp | grep $PORT" >&2
     exit 1
 fi
@@ -86,8 +106,15 @@ if [[ ! -d "$MEDIA_ROOT" ]]; then
 fi
 
 # Report the address the headset should actually use, not a hardcoded one.
-ip_addr="$(ip -4 -o route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' || true)"
-[[ -n "$ip_addr" ]] || ip_addr="<this-pc>"
+# When `host` names a single address the server is reachable only there, so
+# printing the LAN address regardless would send you to a port nothing answers.
+BIND_HOST="$(python3 -c 'from vrserver.config import HOST; print(HOST)')"
+if [[ "$BIND_HOST" == "0.0.0.0" || "$BIND_HOST" == "::" ]]; then
+    ip_addr="$(ip -4 -o route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' || true)"
+    [[ -n "$ip_addr" ]] || ip_addr="<this-pc>"
+else
+    ip_addr="$BIND_HOST"
+fi
 
 echo
 echo "  Appname : $APPNAME"
