@@ -11,5 +11,7 @@
   "auth_hash": "",
   "thumb_width": 480,
   "seek_fraction": 0.5,
-  "max_ffmpeg": 3
+  "max_ffmpeg": 3,
+  "player_button": true,
+  "desktop_scheme": true
 }

@@ -33,6 +33,9 @@ DEFAULTS = {
     "thumb_width": 480,
     "seek_fraction": 0.5,   # grab a frame from the middle of the video
     "max_ffmpeg": 3,        # concurrent ffmpeg processes, total
+    "player_button": True,  # show "open in the device's video player" on cards
+    "desktop_scheme": True, # desktop Play uses a vrplay: link (needs tools/install-
+                            # player-handler.sh); false gives an .m3u download instead
 }
 
 ENV_OVERRIDES = (
@@ -77,6 +80,14 @@ def load_config(path):
         print("config: bad numeric value (%s), using defaults" % exc,
               file=sys.stderr)
         for key in NUMERIC_KEYS:
+            cfg[key] = DEFAULTS[key]
+
+    # A string like "false" is truthy; accept only a real boolean so a quoted
+    # value cannot silently leave the button on.
+    for key in ("player_button", "desktop_scheme"):
+        if not isinstance(cfg[key], bool):
+            print("config: %r must be true or false, using the default" % key,
+                  file=sys.stderr)
             cfg[key] = DEFAULTS[key]
 
     for key in ("scan", "allow", "protect"):
@@ -139,9 +150,15 @@ SEEK_FRACTION = CFG["seek_fraction"]
 LOG_PATH = CFG["log"]
 AUTH_USER = CFG["auth_user"]
 AUTH_HASH = CFG["auth_hash"]
+PLAYER_BUTTON = CFG["player_button"]
+DESKTOP_SCHEME = CFG["desktop_scheme"]
 
 # URL prefix the thumbnail route answers on.
 THUMB_PREFIX = "/_thumb/"
+
+# A one-line playlist for handing a video to the device's own player (VLC and
+# friends). The browser cannot decode HEVC or E-AC-3 audio; a native player can.
+PLAYLIST_PREFIX = "/_m3u/"
 
 # Unlocking. Basic auth alone cannot drive this: the listing page is not itself
 # protected, so a browser has no reason to send credentials with it and the page

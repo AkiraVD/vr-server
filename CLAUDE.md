@@ -35,8 +35,9 @@ Modules form a strict one-way dependency chain; keep it that way:
   module-level constants (`ROOT`, `PORT`, `THUMB_DIR`, `CFG`, ...). Loading is
   never fatal: bad config warns to stderr and falls back to `DEFAULTS`,
   because an unreadable error inside a headset is worse than a running server.
-* `access.py` — the access log, the IP allow list (`ip_allowed`), and the scan
-  scope (`in_scope` / `scan_roots`, memoized).
+* `access.py` — the access log, the IP allow list (`ip_allowed`), the scan
+  scope (`in_scope` / `scan_roots`, memoized), and the protect gate
+  (`is_protected`, `credentials_ok`, `make_cookie`, `set_protect`).
 * `media.py` — `ffprobe` metadata and `ffmpeg` thumbnails, plus `warm_cache`,
   the startup render pass run on a daemon thread from `__main__`.
 * `listing.py` — the dark, large-tap-target directory page. Pure HTML/CSS
@@ -62,7 +63,7 @@ than denying everything — deliberate, and asserted by tests. `safe_abs` /
 `translate_path` additionally realpath-confine everything to `ROOT`.
 
 `protect` is the third gate and the deliberate exception. A folder listed there
-needs HTTP Basic credentials before it is served, listed, or thumbnailed, and
+needs the unlock cookie before it is served, listed, or thumbnailed, and
 one with **no usable password is refused outright** rather than served: the
 fail-open argument does not survive a gate whose failure would publish exactly
 what it exists to hide. `tests/test_protect.py` asserts that inversion, and
@@ -100,6 +101,28 @@ scaling. Renders go through a global `BoundedSemaphore(MAX_FFMPEG)` plus a
 per-key lock, so the startup pass and on-demand requests together never exceed
 `max_ffmpeg` ffmpeg processes and never render the same thumb twice. A seek
 past the last frame produces nothing silently, so `make_thumb` retries at 0.0.
+
+### The Play button hands off to the device's own player
+
+There is deliberately no in-browser player: browsers cannot decode HEVC or
+E-AC-3 audio, and fixing that means converting files. Each card instead carries
+a **Play** button that starts VLC (or whatever the device uses) on the raw
+stream, which handles every codec and all audio/subtitle tracks. The card body
+still links to the raw file for headsets. `player_href` in `listing.py` picks
+the link by user-agent: Android gets an `intent://` that launches VLC (falling
+back to the playlist), iOS `vlc://`, desktop `vrplay:?url=<encoded>`, and the
+Quest browser gets no button. Desktop VLC registers no link scheme, so
+`tools/install-player-handler.sh` registers `vrplay:` once per machine and
+`tools/vrplay_handler.py` launches the first of vlc/celluloid/mpv. That handler
+is reachable from any web page, so it refuses every address outside loopback,
+LAN and tailnet (`tests/test_handler.py`); keep that check. With
+`"desktop_scheme": false` desktop uses the `/_m3u/<path>` playlist instead, and
+`"player_button": false` removes the button and the route.
+
+The player fetches the file itself, so it cannot send the unlock cookie:
+protected files get no button and `/_m3u/` refuses them. The URL handed over is
+built from the request's `Host` header (the only address known to be
+reachable), validated by `HOST_RE` because it lands in a link and a playlist.
 
 ### The instance tag
 

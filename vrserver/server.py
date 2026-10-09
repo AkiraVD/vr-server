@@ -19,12 +19,14 @@ from . import listing
 from .access import (auth_configured, cookie_from_header, cookie_valid,
                      credentials_ok, in_scope, ip_allowed, is_protected,
                      log_line, make_cookie, set_protect)
-from .config import (COOKIE_NAME, HOST, LOCK_PATH, MAX_FORM_BYTES, PORT,
-                     PROTECT_PATH, ROOT, THUMB_PREFIX, UNLOCK_PATH,
-                     UNLOCK_SECONDS)
+from .config import (COOKIE_NAME, HOST, LOCK_PATH, MAX_FORM_BYTES,
+                     PLAYER_BUTTON, PLAYLIST_PREFIX, PORT, PROTECT_PATH, ROOT,
+                     THUMB_PREFIX, UNLOCK_PATH, UNLOCK_SECONDS, VIDEO_EXTS)
 from .media import cache_key, make_thumb
 
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)$")
+# Host goes into a URL inside the playlist, so only what a host:port can hold.
+HOST_RE = re.compile(r"[A-Za-z0-9.\-]+(:\d{1,5})?|\[[0-9A-Fa-f:.]+\](:\d{1,5})?")
 
 
 class Slice:
@@ -80,6 +82,33 @@ class Handler(SimpleHTTPRequestHandler):
         if no_store:
             self.send_header("Cache-Control", "no-store")
             self.send_header("Vary", "Cookie")
+        self.end_headers()
+        return io.BytesIO(payload)
+
+    def origin(self):
+        """scheme://host:port as this client reached us, or "" if unusable.
+
+        Another process has to be told where to fetch the file, and the only
+        address known to work is the one this request came in on (LAN, tailnet
+        or MagicDNS). The Host header is client-supplied and ends up in a link
+        and a playlist, so it is checked against what a host can contain.
+        """
+        host = self.headers.get("Host", "")
+        if not HOST_RE.fullmatch(host):
+            return ""
+        scheme = "https" if self.headers.get("X-Forwarded-Proto") == "https" \
+            else "http"
+        return "%s://%s" % (scheme, host)
+
+    def send_bytes_with(self, payload, ctype, extra):
+        """send_bytes, plus headers, and never cached: the URL inside is
+        built from this request's Host and would be wrong for another client."""
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        for key, value in extra.items():
+            self.send_header(key, value)
         self.end_headers()
         return io.BytesIO(payload)
 
@@ -194,7 +223,11 @@ class Handler(SimpleHTTPRequestHandler):
 
     # -- routes -----------------------------------------------------------
 
-    def send_thumb(self, rel):
+    def gated_file(self, rel):
+        """Absolute path of a file this request may touch, else None (reply sent).
+
+        The gates in one place, so a route added later cannot forget one.
+        """
         path = self.safe_abs(urllib.parse.unquote(rel))
         if not path or not os.path.isfile(path):
             self.send_error(404, "No such file")
@@ -202,9 +235,15 @@ class Handler(SimpleHTTPRequestHandler):
         if not in_scope(path):
             self.send_error(403, "Not a configured folder")
             return None
+        if self.require_auth(path) is False:
+            return None
+        return path
+
+    def send_thumb(self, rel):
         # A thumbnail is a picture of the file. Gating the video but not its
         # preview would hand over the thing worth hiding.
-        if self.require_auth(path) is False:
+        path = self.gated_file(rel)
+        if not path:
             return None
 
         key = cache_key(path)
@@ -226,9 +265,48 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         return io.BytesIO(blob)
 
+    def send_playlist(self, rel):
+        """A one-line .m3u pointing at the raw file, for the device's own player.
+
+        The player then streams the file itself, so HEVC, E-AC-3 and embedded
+        subtitle and audio tracks all work, and nothing is converted here.
+        """
+        if not PLAYER_BUTTON:
+            self.send_error(404, "Not available")
+            return None
+        path = self.gated_file(rel)
+        if not path:
+            return None
+        if os.path.splitext(path)[1].lower() not in VIDEO_EXTS:
+            self.send_error(404, "Not a video")
+            return None
+        if is_protected(path):
+            # The player will not carry the unlock cookie, so it would be
+            # redirected to the form and fail with no explanation.
+            self.send_error(403, "Protected files cannot be opened this way")
+            return None
+
+        origin = self.origin()
+        if not origin:
+            self.send_error(400, "Bad Host header")
+            return None
+        name = os.path.basename(path)
+        url = "%s/%s" % (origin, urllib.parse.quote(
+            os.path.relpath(path, os.path.realpath(ROOT))))
+        # A filename may legally hold a newline, which would end the title line.
+        title = " ".join(name.split())
+        body = ("#EXTM3U\n#EXTINF:-1,%s\n%s\n" % (title, url)).encode("utf-8")
+        payload = self.send_bytes_with(
+            body, "audio/x-mpegurl",
+            {"Content-Disposition":
+             "inline; filename*=UTF-8''%s.m3u" % urllib.parse.quote(name)})
+        return payload
+
     def list_directory(self, path):
         try:
-            page = listing.render(path, authed=self.authed())
+            page = listing.render(path, authed=self.authed(),
+                                  origin=self.origin(),
+                                  agent=self.headers.get("User-Agent", ""))
         except OSError:
             self.send_error(403, "Directory listing not permitted")
             return None
@@ -297,6 +375,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_lock()
         if req.startswith(THUMB_PREFIX):
             return self.send_thumb(req[len(THUMB_PREFIX):])
+        if req.startswith(PLAYLIST_PREFIX):
+            return self.send_playlist(req[len(PLAYLIST_PREFIX):])
 
         path = self.translate_path(self.path)
         if not in_scope(path):

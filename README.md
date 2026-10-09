@@ -210,6 +210,8 @@ mistakes hide.
 | `thumb_width` | `480` | thumbnail width in pixels |
 | `seek_fraction` | `0.5` | where in the video to grab the frame; `0.5` is the middle |
 | `max_ffmpeg` | `3` | concurrent ffmpeg processes |
+| `player_button` | `true` | show a **Player** button on each card that hands the video to the device's own player (VLC, mpv...) through a one-line `.m3u` playlist. The card itself still links to the raw file. Not offered for protected folders. `false` removes the button and the route |
+| `desktop_scheme` | `true` | on a desktop browser, Play opens a `vrplay:` link that starts a local player (VLC, Celluloid or mpv) in one click. Needs the handler installed once per machine: `tools/install-player-handler.sh`. `false` makes desktop Play download an `.m3u` instead |
 
 `scan` entries are relative to `root` (absolute paths work too, but one
 outside `root` is skipped with a warning). `thumbs` and `log` are relative to

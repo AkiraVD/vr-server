@@ -1,0 +1,3 @@
+#!/bin/sh
+# Entry point the desktop entry runs; see vrplay_handler.py for the why.
+exec python3 "$(dirname "$(readlink -f "$0")")/vrplay_handler.py" "$@"

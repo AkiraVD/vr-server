@@ -22,7 +22,8 @@ import urllib.parse
 
 from .access import (auth_configured, candidate_folders, is_protected,
                      protected_set, scan_roots)
-from .config import (CFG, LOCK_PATH, PROTECT_PATH, ROOT, THUMB_PREFIX,
+from .config import (CFG, DESKTOP_SCHEME, LOCK_PATH, PLAYER_BUTTON,
+                     PLAYLIST_PREFIX, PROTECT_PATH, ROOT, THUMB_PREFIX,
                      UNLOCK_PATH, VIDEO_EXTS)
 from .media import cache_key, is_sbs, probe
 
@@ -229,7 +230,7 @@ main { padding: 26px 30px 70px; }
 /* ---- cards ----------------------------------------------------------- */
 
 .card {
-  display: block; overflow: hidden;
+  position: relative; display: block; overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r);
@@ -242,7 +243,22 @@ main { padding: 26px 30px 70px; }
   background: var(--surface-hi);
 }
 .card:active { transform: translateY(-1px); }
-.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+/* The card body is the raw file link, which is what a headset player wants.
+   "Player" is a separate control laid over the thumbnail corner: nesting one
+   link inside the other is not valid HTML. */
+.card .open { display: block; color: inherit; text-decoration: none; }
+.card .open:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.play {
+  position: absolute; top: 10px; right: 10px; z-index: 4;
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 44px; padding: 0 14px 0 11px;
+  background: rgba(5, 6, 10, .82); color: var(--text);
+  border: 1px solid var(--line-hi); border-radius: 22px;
+  font-size: 14px; font-weight: 600; text-decoration: none;
+}
+.play:hover { background: var(--accent); color: #04070d; border-color: var(--accent); }
+.play:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.play svg { width: 16px; height: 16px; fill: currentColor; }
 
 .shot {
   position: relative;
@@ -356,6 +372,8 @@ ICON_LOCK = _SVG % ('<rect x="5" y="11" width="14" height="9" rx="2"/>'
                     '<path d="M8 11V8a4 4 0 0 1 8 0v3"/>')
 ICON_OPEN = _SVG % ('<rect x="5" y="11" width="14" height="9" rx="2"/>'
                     '<path d="M8 11V8a4 4 0 0 1 7.5-2"/>')
+
+ICON_PLAY = _SVG % '<path d="M7 4.5v15l12-7.5z"/>'
 
 ICON_FILM = _SVG % ('<rect x="3" y="5" width="18" height="14" rx="2"/>'
                     '<path d="M7 5v14M17 5v14M3 12h18M3 8.5h4M3 15.5h4'
@@ -591,7 +609,39 @@ def breadcrumbs(rel_here, home):
     return "<div class='crumbs'>%s</div>" % "".join(out)
 
 
-def video_card(full, link, safe_name, root):
+def player_href(rel, origin, agent):
+    """Where the Play button points, or None when it should not be shown.
+
+    The aim is one tap that starts the device's own player on the stream.
+    Android Chrome can launch VLC directly from an intent: link, falling back
+    to the playlist if VLC is missing. VLC for iOS registers vlc://. Desktop
+    VLC registers no link scheme of its own, so there a vrplay: link goes to a
+    small per-machine handler (tools/); without it, the playlist is the fallback
+    and the OS opens it with whatever plays .m3u. The Quest browser gets
+    nothing, because the card's raw link is already how a headset plays.
+    """
+    quoted = urllib.parse.quote(rel)
+    playlist = "%s%s" % (PLAYLIST_PREFIX, quoted)
+    if "OculusBrowser" in agent or "Quest" in agent:
+        return None
+    if not origin:
+        return playlist
+    scheme, _, host = origin.partition("://")
+    if "Android" in agent:
+        fallback = urllib.parse.quote("%s/%s" % (origin, playlist.lstrip("/")),
+                                      safe="")
+        return ("intent://%s/%s#Intent;scheme=%s;package=org.videolan.vlc;"
+                "type=video/*;S.browser_fallback_url=%s;end"
+                % (host, quoted, scheme, fallback))
+    if any(m in agent for m in ("iPhone", "iPad", "iPod")):
+        return "vlc://%s/%s" % (origin, quoted)
+    if DESKTOP_SCHEME:
+        return "vrplay:?url=%s" % urllib.parse.quote(
+            "%s/%s" % (origin, quoted), safe="")
+    return playlist
+
+
+def video_card(full, link, safe_name, root, origin="", agent=""):
     """A card carrying the thumbnail, duration, size and a 3D marker."""
     rel = os.path.relpath(full, root)
     key = cache_key(full)
@@ -607,17 +657,28 @@ def video_card(full, link, safe_name, root):
     if meta.get("width"):
         size += " &middot; %d&times;%d" % (meta["width"], meta["height"])
 
-    return ("<a class='card' href='%s'>"
+    # VLC cannot send the unlock cookie, so a protected file would only fail
+    # there; offering the button would promise something it cannot deliver.
+    play = ""
+    href = (player_href(rel, origin, agent)
+            if PLAYER_BUTTON and not is_protected(full) else None)
+    if href:
+        play = ("<a class='play' href='%s' title=\"Open in your device's "
+                "video player\" aria-label='Play in video player'>%s"
+                "<span>Play</span></a>" % (html.escape(href, quote=True),
+                                           ICON_PLAY))
+
+    return ("<div class='card'><a class='open' href='%s'>"
             "<div class='shot'><div class='glyph'>%s</div>"
             "<img loading='lazy' src='%s%s' alt=''>"
             "<div class='scrim'></div>%s%s</div>"
             "<div class='meta'><div class='name'>%s</div>"
-            "<div class='sub'>%s</div></div></a>"
+            "<div class='sub'>%s</div></div></a>%s</div>"
             % (link, ICON_FILM, THUMB_PREFIX, urllib.parse.quote(rel),
-               chip, dur, safe_name, size or "&nbsp;"))
+               chip, dur, safe_name, size or "&nbsp;", play))
 
 
-def render(path, authed=False):
+def render(path, authed=False, origin="", agent=""):
     """The full HTML page for a directory. Raises OSError if unreadable.
 
     `authed` decides whether protected folders are part of the page at all.
@@ -639,7 +700,7 @@ def render(path, authed=False):
         except OSError:
             pass
         cards.append(video_card(full, urllib.parse.quote(name),
-                                html.escape(name), root))
+                                html.escape(name), root, origin, agent))
 
     if cards:
         count = "%d video%s &middot; %s" % (len(cards),
